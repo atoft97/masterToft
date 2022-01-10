@@ -17,12 +17,7 @@ for drive in drives:
 	iamgePaths.sort()
 	for imageName in tqdm(iamgePaths):
 		originalImage = cv2.imread(loadPath+ "/"+imageName, 0)
-		
-		newImge = cv2.multiply(originalImage, 15)
-
-
-		newImge[newImge <= 0] = 255
-
+		newImge = cv2.multiply(originalImage, 15) #multply by 15
+		newImge[newImge <= 0] = 255 #caps at 255
 		newImge = cv2.bitwise_not(newImge)
-
 		cv2.imwrite(savePath + "/" + imageName, newImge)
