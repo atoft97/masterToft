@@ -34,9 +34,9 @@ for bag_file in bag_files:
     bag = rosbag.Bag(args.bag_files_folder +"/"+ bag_file, "r")
     bridge = CvBridge()
     
-    #topics = bag.get_type_and_topic_info()[1].keys()
-    #for topic in topics:
-    #    print(topic)
+    topics = bag.get_type_and_topic_info()[1].keys()
+    for topic in topics:
+        print(topic)
 
     savePathBag = str(args.output_dir +"/"+ bag_file)[:-4]
     os.makedirs(savePathBag, exist_ok=True)

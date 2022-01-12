@@ -24,7 +24,7 @@ for drivePath in drivePaths:
                 img2 = cv2.imread(fullDrivePath + "/reflec_image/" + imageName, 0)
             img3 = cv2.imread(fullDrivePath + "/rangeBright/" + imageName, 0)
             img = cv2.merge((img1, img2, img3))
-            cv2.imwrite("../data/combinedImages/" + drivePath + "/" + imageName, img)
+            cv2.imwrite("../data/combinedImages/" + drivePath + "/" + drivePath + imageName[5:], img)
         except:
             print("failed on: ", fullDrivePath, " Image number:", imageName)
 
