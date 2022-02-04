@@ -39,17 +39,35 @@ for bag_file in bag_files:
         print(topic)
 
     savePathBag = str(args.output_dir +"/"+ bag_file)[:-4]
-    os.makedirs(savePathBag, exist_ok=True)
+    #os.makedirs(savePathBag, exist_ok=True)
 
     for imageToptic in ['nearir_image', 'range_image', 'reflec_image', 'signal_image']:
         savePathTopic = savePathBag + "/" + imageToptic
-        os.makedirs(savePathTopic, exist_ok=True)
+        #os.makedirs(savePathTopic, exist_ok=True)
         print("Image topic: ", imageToptic)
         count = 0
         for topic, msg, t in tqdm(bag.read_messages(topics=args.image_topic + "/" + imageToptic)): #tqdm
             cv_img = bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-            cv2.imwrite(savePathTopic + "/frame" + str(count).zfill(5) +".png", cv_img)
+            #cv2.imwrite(savePathTopic + "/frame" + str(count).zfill(5) +".png", cv_img)
             count += 1
 
+            if(count == 1):
+                firstTime = t
+            lastTime = t
+
+
+
+        totTime = lastTime - firstTime
+        print("Total time:", totTime)
+        print("Total time sec:", totTime/(10**9))
+        print("Number of measurements:", count)
+        print("Avg time:", totTime/count)
+        print("Avg time sec:", (int(str(totTime))/count)/(10**9))
+        print("First", firstTime)
+        print("Last", lastTime)
+
+        break
+
     bag.close()
+    break
 
