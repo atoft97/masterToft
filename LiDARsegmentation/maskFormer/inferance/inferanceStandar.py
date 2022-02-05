@@ -46,9 +46,11 @@ device = torch.device("cuda")
 cfg = get_cfg()
 add_deeplab_config(cfg)
 add_mask_former_config(cfg)
-cfg.merge_from_file("configs/ade20k-150/swin/maskformer_swin_large_IN21k_384_bs16_160k_res640.yaml")
-cfg.MODEL.WEIGHTS = "models/model_final_aefa3b.pkl"
+#cfg.merge_from_file("configs/ade20k-150/swin/maskformer_swin_large_IN21k_384_bs16_160k_res640.yaml")
+#cfg.MODEL.WEIGHTS = "models/model_final_aefa3b.pkl"
 
+cfg.merge_from_file("configs/ade20k-150/swin/maskformer_swin_tiny_bs16_160k.yaml")
+cfg.MODEL.WEIGHTS = "models/model_final_8657a5.pkl"
 
 cfg.MODEL.RETINANET.SCORE_THRESH_TEST = 0.5
 cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5
@@ -61,7 +63,7 @@ modelYo = build_model(cfg)
 
 metadata = MetadataCatalog.get(cfg.DATASETS.TEST[0])
 print(metadata)
-
+#print(fail)
 
 WINDOW_NAME = "WebCamTest"
 
@@ -73,7 +75,8 @@ typeOfFrame = "Image"
 #typeOfFrame = "VideoOptak"
 
 index = 0
-startPath = "../../../data/combinedImagesTaller/plains_drive"
+#startPath = "../../../data/combinedImagesTaller/plains_drive"
+startPath = "../../../data/dataset/train/images"
 
 files = listdir(startPath)
 files.sort()
@@ -124,7 +127,30 @@ def visualise_predicted_frame(frame, predictions):
     vis_frame = cv2.cvtColor(vis_frame.get_image(), cv2.COLOR_RGB2BGR)
     return(vis_frame)
 
-modelName = "semantic_plains_drive_tall"
+
+def visEachClass(frame, predictions):
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    frame_visualizer = Visualizer(frame, metadata)
+    sem_seg = predictions["sem_seg"]
+    #print(sem_seg)
+    #print(sem_seg.shape)
+    #print(type(sem_seg[0]))
+    #pred = (sem_seg[0] * 128).to('cpu').numpy()
+    #print(pred)
+    #print(len(sem_seg))
+
+    print(sem_seg[2])
+    print(sem_seg[5])
+    print(sem_seg[12])
+
+    os.makedirs("outputImages/LiDAR/" + modelName + "/" + str(counter), exist_ok=True)
+
+    for classNumber in range(len(sem_seg)):
+        pred = (sem_seg[classNumber] * 128).to('cpu').numpy()
+        cv2.imwrite("outputImages/LiDAR/" + modelName + "/" + str(counter) + "/" + str(classNumber) + ".png", pred)
+
+
+modelName = "semanticStandardTest2"
 os.makedirs("outputImages/LiDAR/" + modelName, exist_ok=True)
 
 counter=0
@@ -140,6 +166,7 @@ for fileName in files:
     totalTime += diffTime
     print("avgTime", totalTime/counter)
     vis_panoptic = visualise_predicted_frame(frame, predictedPanoptic)
+    visEachClass(frame, predictedPanoptic)
     combinedFrame = np.vstack((vis_panoptic, frame))
     if (saving == True):
         cv2.imwrite("outputImages/LiDAR/" + modelName + "/" + fileName, combinedFrame)

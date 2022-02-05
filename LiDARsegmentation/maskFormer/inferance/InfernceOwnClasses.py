@@ -1,13 +1,14 @@
 import argparse
 import glob
 import multiprocessing as mp
+from traceback import print_tb
 import numpy as np
 import os
 import tempfile
 import time
 import warnings
 import cv2
-import tqdm
+from tqdm import tqdm
 
 from detectron2.config import get_cfg
 from detectron2.data.detection_utils import read_image
@@ -32,7 +33,7 @@ from detectron2.engine import DefaultTrainer, default_argument_parser, default_s
 
 import nvidia_smi
 
-modelName = "000002"
+modelName = "semanticRGB"
 
 nvidia_smi.nvmlInit()
 handle = nvidia_smi.nvmlDeviceGetHandleByIndex(0)
@@ -56,7 +57,8 @@ cfg = get_cfg()
 # for poly lr schedule
 add_deeplab_config(cfg)
 add_mask_former_config(cfg)
-cfg.merge_from_file("configs/coco-panoptic/swin/maskformer_panoptic_swin_large_IN21k_384_bs64_554k.yaml")
+#cfg.merge_from_file("configs/coco-panoptic/swin/maskformer_panoptic_swin_large_IN21k_384_bs64_554k.yaml")
+cfg.merge_from_file("configs/ade20k-150/swin/maskformer_swin_tiny_bs16_160k.yaml")
 cfg.MODEL.WEIGHTS = "models/" + modelName +".pth"
 #cfg.SOLVER.MAX_ITER = 1000*10*5
 #cfg.BASE_LR = 0.0002
@@ -64,8 +66,8 @@ cfg.MODEL.WEIGHTS = "models/" + modelName +".pth"
 #cfg.DATASETS.TRAIN = ("coco_2017_train_panoptic")
 cfg.MODEL.ROI_HEADS.NUM_CLASSES = 6
 cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 13
-cfg.DATASETS.TRAIN = ("ffi_train", )
-cfg.DATASETS.TEST = ("ffi_test", )
+cfg.DATASETS.TRAIN = ("ffi_train_stuffonly", )
+cfg.DATASETS.TEST = ("ffi_val_stuffonly", )
 cfg.INPUT.MASK_FORMAT = "bitmask"
 cfg.MODEL.MASK_FORMER.TEST.OBJECT_MASK_THRESHOLD = 0.5
 cfg.MODEL.MASK_FORMER.TEST.OVERLAP_THRESHOLD = 0.01
@@ -81,29 +83,17 @@ cfg.freeze()
 
 
 
-register_coco_panoptic(name="ffi_train", metadata={"stuff_dataset_id_to_contiguous_id":{8: 1, 7: 2, 1: 4, 2: 5, 5: 6, 10: 9, 11: 10}, "thing_dataset_id_to_contiguous_id":{4: 0, 3: 3, 6: 7, 9: 8, 12: 11, 13: 12}}, image_root="dataset_train/images", panoptic_root="dataset_train/panoptic_train" , panoptic_json="dataset_train/annotations/panoptic_train.json", instances_json="dataset_train/annotations/instances_train.json")
-register_coco_panoptic(name="ffi_test", metadata={"stuff_dataset_id_to_contiguous_id":{8: 1, 7: 2, 1: 4, 2: 5, 5: 6, 10: 9, 11: 10},"thing_dataset_id_to_contiguous_id":{4: 0, 3: 3, 6: 7, 9: 8, 12: 11, 13: 12}}, image_root="dataset_test/images", panoptic_root="dataset_test/panoptic_test" ,panoptic_json="dataset_test/annotations/panoptic_test.json", instances_json="dataset_test/annotations/instances_test.json")
-
-MetadataCatalog.get("ffi_train").set(stuff_classes=['Person', 'Sky', 'Dirtroad', 'Vehicle', 'Forrest', 'CameraEdge', 'Bush', 'Puddle', 'Large_stone', 'Grass', 'Gravel', 'Tree', 'Building'])
-MetadataCatalog.get("ffi_train").set(stuff_colors=[[255, 38, 38], [15, 171, 255], [191, 140, 0], [150, 0, 191], [46, 153, 0], [70, 70, 70], [232, 227, 81], [255, 179, 0], [200, 200, 200], [64, 255, 38], [180, 180, 180], [118, 255, 99], [255, 20, 20]])
-MetadataCatalog.get("ffi_train").set(stuff_dataset_id_to_contiguous_id={8: 1, 7: 2, 1: 4, 2: 5, 5: 6, 10: 9, 11: 10})
+register_coco_panoptic_separated(name="ffi_train", metadata={}, sem_seg_root="../../../data/dataset/train/panoptic_stuff_train", image_root="../../../data/dataset/train/images", panoptic_root="../../../data/dataset/train/panoptic_train" , panoptic_json="../../../data/dataset/train/annotations/panoptic_train.json" ,instances_json="../../../data/dataset/train/annotations/instances_train.json")
+register_coco_panoptic_separated(name="ffi_val", metadata={}, sem_seg_root="../../../data/dataset/train/panoptic_stuff_train", image_root="../../../data/dataset/train/images", panoptic_root="../../../data/dataset/train/panoptic_train" , panoptic_json="../../../data/dataset/train/annotations/panoptic_train.json" ,instances_json="../../../data/dataset/train/annotations/instances_train.json")
 
 
-MetadataCatalog.get("ffi_train").set(thing_classes=['Person', 'Sky', 'Dirtroad', 'Vehicle', 'Forrest', 'CameraEdge', 'Bush', 'Puddle', 'Large_stone', 'Grass', 'Gravel', 'Tree', 'Building'])
-MetadataCatalog.get("ffi_train").set(thing_colors=[[255, 38, 38], [15, 171, 255], [191, 140, 0], [150, 0, 191], [46, 153, 0], [70, 70, 70], [232, 227, 81], [255, 179, 0], [200, 200, 200], [64, 255, 38], [180, 180, 180], [118, 255, 99], [255, 20, 20]])
-MetadataCatalog.get("ffi_train").set(thing_dataset_id_to_contiguous_id={4: 0, 3: 3, 6: 7, 9: 8, 12: 11, 13: 12})
+MetadataCatalog.get("ffi_train_stuffonly").set(stuff_classes=['Person', 'Sky', 'Dirtroad', 'Vehicle', 'Forrest', 'CameraEdge', 'Bush', 'Puddle', 'Large_stone', 'Grass', 'Gravel', 'Building'])
+MetadataCatalog.get("ffi_train_stuffonly").set(stuff_colors=[[255, 38, 38], [15, 171, 255], [191, 140, 0], [150, 0, 191], [46, 153, 0], [70, 70, 70], [232, 227, 81], [255, 179, 0], [200, 200, 200], [64, 255, 38], [180, 180, 180], [255, 20, 20]])
+MetadataCatalog.get("ffi_train_stuffonly").set(stuff_dataset_id_to_contiguous_id={1:1, 2:2, 3:3, 4:4, 5:5, 6:6, 7:7, 8:8, 9:9, 10:10, 11:11, 12:12})
 
-
-MetadataCatalog.get("ffi_test").set(stuff_classes=['Person', 'Sky', 'Dirtroad', 'Vehicle', 'Forrest', 'CameraEdge', 'Bush', 'Puddle', 'Large_stone', 'Grass', 'Gravel', 'Tree', 'Building'])
-MetadataCatalog.get("ffi_test").set(stuff_colors=[[255, 38, 38], [15, 171, 255], [191, 140, 0], [150, 0, 191], [46, 153, 0], [70, 70, 70], [232, 227, 81], [255, 179, 0], [200, 200, 200], [64, 255, 38], [180, 180, 180], [118, 255, 99], [255, 20, 20]])
-MetadataCatalog.get("ffi_test").set(stuff_dataset_id_to_contiguous_id={8: 1, 7: 2, 1: 4, 2: 5, 5: 6, 10: 9, 11: 10})
-
-
-MetadataCatalog.get("ffi_test").set(thing_classes=['Person', 'Sky', 'Dirtroad', 'Vehicle', 'Forrest', 'CameraEdge', 'Bush', 'Puddle', 'Large_stone', 'Grass', 'Gravel', 'Tree', 'Building'])
-MetadataCatalog.get("ffi_test").set(thing_colors=[[255, 38, 38], [15, 171, 255], [191, 140, 0], [150, 0, 191], [46, 153, 0], [70, 70, 70], [232, 227, 81], [255, 179, 0], [200, 200, 200], [64, 255, 38], [180, 180, 180], [118, 255, 99], [255, 20, 20]])
-MetadataCatalog.get("ffi_test").set(thing_dataset_id_to_contiguous_id={4: 0, 3: 3, 6: 7, 9: 8, 12: 11, 13: 12})
-
-
+MetadataCatalog.get("ffi_val_stuffonly").set(stuff_classes=['Person', 'Sky', 'Dirtroad', 'Vehicle', 'Forrest', 'CameraEdge', 'Bush', 'Puddle', 'Large_stone', 'Grass', 'Gravel', 'Building'])
+MetadataCatalog.get("ffi_val_stuffonly").set(stuff_colors=[[255, 38, 38], [15, 171, 255], [191, 140, 0], [150, 0, 191], [46, 153, 0], [70, 70, 70], [232, 227, 81], [255, 179, 0], [200, 200, 200], [64, 255, 38], [180, 180, 180], [255, 20, 20]])
+MetadataCatalog.get("ffi_val_stuffonly").set(stuff_dataset_id_to_contiguous_id={1:1, 2:2, 3:3, 4:4, 5:5, 6:6, 7:7, 8:8, 9:9, 10:10, 11:11, 12:12})
 
 #cfg.merge_from_list(['MODEL.DEVICE', 'cpu', 'MODEL.WEIGHTS', 'detectron2://COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x/137849600/model_final_f10217.pkl'])
 #cfg.merge_from_list(['MODEL.DEVICE', 'cpu', 'MODEL.WEIGHTS', 'detectron2://COCO-PanopticSegmentation/panoptic_fpn_R_50_3x/139514569/model_final_c10459.pkl'])
@@ -129,9 +119,9 @@ modelYo = build_model(cfg)
 
 metadata = MetadataCatalog.get(cfg.DATASETS.TEST[0])
 print(metadata)
-print(len(metadata.thing_classes))
-print(metadata.thing_classes)
-print(metadata.thing_dataset_id_to_contiguous_id)
+#print(len(metadata.thing_classes))
+#print(metadata.thing_classes)
+#print(metadata.thing_dataset_id_to_contiguous_id)
 
 #width = 1920
 #height = 1080
@@ -153,8 +143,9 @@ index = 0
 
 #startPath = "/home/potetsos/skule/2021Host/prosjektTesting/combined/detectron2/demo/bilder"
 #startPath = "/lhome/asbjotof/work/project/training/dataset_test/images"
-startPath = "../../../data/combinedImages/road_drive2"
-
+#startPath = "../../../data/combinedImages/road_drive2"
+startPath = "../../../data/dataset/train/images"
+startPath = "inputImages2"
 
 files = listdir(startPath)
 files.sort()
@@ -218,41 +209,55 @@ def getFrame(index):
 
 def visualise_predicted_frame(frame, predictions):
     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    if "panoptic_seg" in predictions:
-        panoptic_seg, segments_info = predictions["panoptic_seg"]
-        vis_frame = video_visualizer.draw_panoptic_seg_predictions(
-            frame, panoptic_seg.to('cpu'), segments_info
-        )
-    elif ("instances" in predictions):
-        predictions = predictions["instances"].to(device)
-        vis_frame = video_visualizer.draw_instance_predictions(frame, predictions)
-
-    #print(type(vis_frame))
-
+    frame_visualizer = Visualizer(frame, metadata)
+    sem_seg = predictions["sem_seg"]
+    frame_visualizer.draw_sem_seg(sem_seg.argmax(dim=0).to('cpu'), area_threshold=None, alpha=0.5)
+    vis_frame = frame_visualizer.output
     vis_frame = cv2.cvtColor(vis_frame.get_image(), cv2.COLOR_RGB2BGR)
-
-    #print(type(vis_frame))
-    #print(vis_frame.shape)
-
     return(vis_frame)
 
-    cv2.namedWindow("test", cv2.WINDOW_NORMAL)
-    cv2.imshow("test", vis_frame)
-    cv2.waitKey(1)
+def visEachClass(frame, predictions):
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    frame_visualizer = Visualizer(frame, metadata)
+    sem_seg = predictions["sem_seg"]
+    #print(sem_seg)
+    #print(sem_seg.shape)
+    #print(type(sem_seg[0]))
+    #pred = (sem_seg[0] * 128).to('cpu').numpy()
+    #print(pred)
+    #print(len(sem_seg))
+
+    #print(sem_seg[0])
+    #print(sem_seg[5])
+    #print(sem_seg[10])
+
+    for classNumber in range(len(sem_seg)):
+        #print(classNumber)
+        #print(sem_seg[classNumber])
+        #print("\n")
+
+
+        pred = (sem_seg[classNumber] * 128).to('cpu').numpy()
+        cv2.imwrite("outputImages/LiDAR/" + modelName + "/" + str(counter) + "/" + str(classNumber) + ".png", pred)
+
 
 counter=0
 totalTime = 0
-for fileName in files:
+for fileName in tqdm(files):
     counter += 1
-    print(str(counter) + "/" +str(len(files)))
+    #print(str(counter) + "/" +str(len(files)))
     frame = read_image(startPath + "/" +fileName, format="BGR")
     startTime = time.time()
     predictedPanoptic = predictor(frame)
+    #print(predictedPanoptic)
     diffTime = time.time() - startTime
     totalTime += diffTime
-    print("avgTime", totalTime/counter)
+    #print("avgTime", totalTime/counter)
     vis_panoptic = visualise_predicted_frame(frame, predictedPanoptic)
+    visEachClass(frame, predictedPanoptic)
     combinedFrame = np.hstack((vis_panoptic, frame))
+    #print(combinedFrame)
+    #print(combinedFrame.shape)
     if (saving == True):
         cv2.imwrite("outputImages/LiDAR/" + modelName + "/" + fileName, combinedFrame)
 
