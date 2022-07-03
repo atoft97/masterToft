@@ -1,6 +1,0 @@
-plains_drive04300
-plains_drive04320
-plains_drive04340
-plains_drive04360
-plains_drive04380
-plains_drive04400
