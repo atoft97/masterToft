@@ -1,0 +1,493 @@
+# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+"""
+MaskFormer Training Script.
+
+This script is a simplified version of the training script in detectron2/tools.
+"""
+import copy
+import itertools
+import logging
+import os
+
+from collections import OrderedDict
+from select import epoll
+from typing import Any, Dict, List, Set
+
+import torch
+
+import detectron2.utils.comm as comm
+from detectron2.checkpoint import DetectionCheckpointer
+from detectron2.config import get_cfg
+from detectron2.data import MetadataCatalog, build_detection_train_loader, build_detection_test_loader
+from detectron2.engine import (
+    DefaultTrainer,
+    default_argument_parser,
+    default_setup,
+    launch,
+)
+from detectron2.evaluation import (
+    CityscapesInstanceEvaluator,
+    CityscapesSemSegEvaluator,
+    COCOEvaluator,
+    COCOPanopticEvaluator,
+    DatasetEvaluators,
+    LVISEvaluator,
+    SemSegEvaluator,
+    verify_results,
+)
+from detectron2.projects.deeplab import add_deeplab_config, build_lr_scheduler
+from detectron2.solver.build import maybe_add_gradient_clipping
+from detectron2.utils.logger import setup_logger
+
+# MaskFormer
+from mask2former import (
+    COCOInstanceNewBaselineDatasetMapper,
+    COCOPanopticNewBaselineDatasetMapper,
+    InstanceSegEvaluator,
+    MaskFormerInstanceDatasetMapper,
+    MaskFormerPanopticDatasetMapper,
+    MaskFormerSemanticDatasetMapper,
+    SemanticSegmentorWithTTA,
+    add_maskformer2_config,
+)
+
+from mask_former_semantic_dataset_mapper_test import MaskFormerSemanticDatasetMapperTest
+
+import sys
+
+from detectron2.data.datasets import register_coco_panoptic_separated, register_coco_panoptic
+
+from registerDataset import register_numpy_dataset, register_combined_dataset
+
+from LossEvalHook import LossEvalHook
+
+#register_coco_panoptic_separated(name="ffi_train", metadata={}, sem_seg_root="datasetLidarTilNo/train/panoptic_stuff_train", image_root="datasetLidarTilNo/train/images", panoptic_root="datasetLidarTilNo/train/panoptic_train" , panoptic_json="datasetLidarTilNo/train/annotations/panoptic_train.json" ,instances_json="datasetLidarTilNo/train/annotations/instances_train.json")
+#register_coco_panoptic_separated(name="ffi_val", metadata={}, sem_seg_root="dataset/val/panoptic_stuff_val", image_root="dataset/val/images", panoptic_root="dataset/val/panoptic_val" , panoptic_json="dataset/val/annotations/panoptic_val.json" ,instances_json="dataset/val/annotations/instances_val.json")
+#register_coco_panoptic_separated(name="ffi_val", metadata={}, sem_seg_root="datasetLidarTilNo/train/panoptic_stuff_train", image_root="datasetLidarTilNo/train/images", panoptic_root="datasetLidarTilNo/train/panoptic_train" , panoptic_json="datasetLidarTilNo/train/annotations/panoptic_train.json" ,instances_json="datasetLidarTilNo/train/annotations/instances_train.json")
+
+
+COCO_CATEGORIES = [
+{"supercategory": "Forrest",    "color": [46,153,0],    "isthing": 0, "id": 1,  "name": "Forrest"},
+{"supercategory": "CameraEdge", "color": [70,70,70],    "isthing": 0, "id": 2,  "name": "CameraEdge"},
+{"supercategory": "Vehicle",    "color": [150,0,191],   "isthing": 0, "id": 3,  "name": "Vehicle"},
+{"supercategory": "Person",     "color": [255,38,38],   "isthing": 0, "id": 4,  "name": "Person"},
+{"supercategory": "Bush",       "color": [232,227,81],  "isthing": 0, "id": 5,  "name": "Bush"},
+{"supercategory": "Puddle",     "color": [255,179,0],   "isthing": 0, "id": 6,  "name": "Puddle"},
+{"supercategory": "Dirtroad",   "color": [191,140,0],   "isthing": 0, "id": 7,  "name": "Dirtroad"},
+{"supercategory": "Sky",        "color": [15,171,255],  "isthing": 0, "id": 8,  "name": "Sky"},
+{"supercategory": "Large_stone","color": [200,200,200], "isthing": 0, "id": 9,  "name": "Large_stone"},
+{"supercategory": "Grass",      "color": [64,255,38],   "isthing": 0, "id": 10, "name": "Grass"},
+{"supercategory": "Gravel",     "color": [180,180,180], "isthing": 0, "id": 11, "name": "Gravel"},
+{"supercategory": "Building",   "color": [255,20,20],   "isthing": 0, "id": 12, "name": "Building"},
+{"supercategory": "Snow", 		"color": [203,203,255],  "isthing": 0, "id": 13, "name": "Snow"}
+]
+
+register_numpy_dataset(name="ffi_train_stuffonly",   metadata={}, sem_seg_root="ffiLiDARdataset16/train/idSegment", image_root="ffiLiDARdataset16/train/numpyImage")
+register_numpy_dataset(name="ffi_val_stuffonly", metadata={}, sem_seg_root="ffiLiDARdataset16/val/idSegment", image_root="ffiLiDARdataset16/val/numpyImage")
+
+#register_combined_dataset(name="ffi_train_stuffonly",   metadata={}, sem_seg_root="ffiLiDARdatasetWithRGBCounter/train/lidarLabelIDProjected", lidar_root="ffiLiDARdatasetWithRGBCounter/train/lidarNumpyProjected", rgb_root="ffiLiDARdatasetWithRGBCounter/train/rgbProjected")
+#register_combined_dataset(name="ffi_val_stuffonly", metadata={}, sem_seg_root="ffiLiDARdatasetWithRGBCounter/val/lidarLabelIDProjected", lidar_root="ffiLiDARdatasetWithRGBCounter/val/lidarNumpyProjected", rgb_root="ffiLiDARdatasetWithRGBCounter/val/rgbProjected")
+
+
+classes = ["other"]
+colors = [[0,0,0]]
+
+for category in COCO_CATEGORIES:
+    classes.append(category['name'])
+    colors.append(category['color'])
+
+#MetadataCatalog.get("ffi_train_stuffonly").set(stuff_classes=['other', 'Grass', 'CameraEdge', 'Vehicle', 'Person', 'Bush', 'Puddle', 'Building', 'Dirtroad', 'Sky', 'Large_stone', 'Forrest', 'Gravel'])
+#MetadataCatalog.get("ffi_train_stuffonly").set(stuff_colors=[[255,255,255], [64,255,38], [70,70,70], [150,0,191], [255,38,38], [232,227,81], [255,179,0], [255,20,20], [191,140,0], [15,171,255], [200,200,200], [46,153,0], [180,180,180]])
+
+MetadataCatalog.get("ffi_train_stuffonly").set(stuff_classes=classes)
+MetadataCatalog.get("ffi_train_stuffonly").set(stuff_colors=colors)
+
+MetadataCatalog.get("ffi_val_stuffonly").set(stuff_classes=classes)
+MetadataCatalog.get("ffi_val_stuffonly").set(stuff_colors=colors)
+
+
+#MetadataCatalog.get("ffi_train_stuffonly").set(stuff_classes=['other', 'Grass', 'CameraEdge', 'Vehicle', 'Person', 'Bush', 'Puddle', 'Building', 'Dirtroad', 'Sky', 'Large_stone', 'Forrest', 'Gravel'])
+#MetadataCatalog.get("ffi_train_stuffonly").set(stuff_colors=[[255,255,255], [64,255,38], [70,70,70], [150,0,191], [255,38,38], [232,227,81], [255,179,0], [255,20,20], [191,140,0], [15,171,255], [200,200,200], [46,153,0], [180,180,180]])
+
+#MetadataCatalog.get("ffi_val_stuffonly").set(stuff_classes=['other', 'Grass', 'CameraEdge', 'Vehicle', 'Person', 'Bush', 'Puddle', 'Building', 'Dirtroad', 'Sky', 'Large_stone', 'Forrest', 'Gravel'])
+#MetadataCatalog.get("ffi_val_stuffonly").set(stuff_colors=[[255,255,255], [64,255,38], [70,70,70], [150,0,191], [255,38,38], [232,227,81], [255,179,0], [255,20,20], [191,140,0], [15,171,255], [200,200,200], [46,153,0], [180,180,180]])
+
+
+#color_to_label = {(0,0,0):0, (108,64,20):1, (0,102,0):3, (0,255,0):4,(0,153,153):5,(0,128,255):6,(0,0,255):7,(255,255,0):8,(255,0,127):9,(64,64,64):10,(255,0,0):12,(102,0,0):15,(204,153,255):17,(102,0,204):18,(255,153,204):19,(170,170,170):23,(41,121,255):27,(134,255,239):31,(99,66,34):33,(110,22,138):34}
+
+#MetadataCatalog.get("ffi_train_stuffonly").set(stuff_classes=['void', 'dirt', 'grass', 'tree', 'pole', 'water', 'sky', 'vehicle', 'object', 'asphalt', 'building', 'log', 'person', 'fence', 'bush', 'concrete', 'barrier', 'puddle', 'mud', 'rubble'])
+#MetadataCatalog.get("ffi_train_stuffonly").set(stuff_colors=[[(0,0,0)], [108,64,20], [0,102,0], [0,255,0], [0,153,153], [0,128,255], [0,0,255], [255,255,0], [255,0,127], [64,64,64], [255,0,0], [102,0,0], [204,153,255], [102,0,204], [255,153,204], [170,170,170], [41,121,255], [134,255,239], [99,66,34], [110,22,138]])
+
+#MetadataCatalog.get("ffi_val_stuffonly").set(stuff_classes=['void', 'dirt', 'grass', 'tree', 'pole', 'water', 'sky', 'vehicle', 'object', 'asphalt', 'building', 'log', 'person', 'fence', 'bush', 'concrete', 'barrier', 'puddle', 'mud', 'rubble'])
+#MetadataCatalog.get("ffi_val_stuffonly").set(stuff_colors=[[(0,0,0)], [108,64,20], [0,102,0], [0,255,0], [0,153,153], [0,128,255], [0,0,255], [255,255,0], [255,0,127], [64,64,64], [255,0,0], [102,0,0], [204,153,255], [102,0,204], [255,153,204], [170,170,170], [41,121,255], [134,255,239], [99,66,34], [110,22,138]])
+
+
+
+
+class Trainer(DefaultTrainer):
+    """
+    Extension of the Trainer class adapted to MaskFormer.
+    """
+    def build_hooks(self):
+        hooks = super().build_hooks()
+        mapper = MaskFormerSemanticDatasetMapperTest(self.cfg, True, numpyData=True)
+        dataLoader = build_detection_test_loader(self.cfg, "ffi_val_stuffonly", mapper=mapper)
+        hooks.insert(-1,LossEvalHook(
+            20,
+            self.model,
+            dataLoader
+        ))
+        return hooks
+
+    @classmethod
+    def build_evaluator(cls, cfg, dataset_name, output_folder=None):
+        """
+        Create evaluator(s) for a given dataset.
+        This uses the special metadata "evaluator_type" associated with each
+        builtin dataset. For your own dataset, you can simply create an
+        evaluator manually in your script and do not have to worry about the
+        hacky if-else logic here.
+        """
+        '''
+        if output_folder is None:
+            output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
+        evaluator_list = []
+        evaluator_type = MetadataCatalog.get(dataset_name).evaluator_type
+        # semantic segmentation
+        if evaluator_type in ["sem_seg", "ade20k_panoptic_seg"]:
+            evaluator_list.append(
+                SemSegEvaluator(
+                    dataset_name,
+                    distributed=True,
+                    output_dir=output_folder,
+                )
+            )
+        # instance segmentation
+        if evaluator_type == "coco":
+            evaluator_list.append(COCOEvaluator(dataset_name, output_dir=output_folder))
+        # panoptic segmentation
+        if evaluator_type in [
+            "coco_panoptic_seg",
+            "ade20k_panoptic_seg",
+            "cityscapes_panoptic_seg",
+            "mapillary_vistas_panoptic_seg",
+        ]:
+            if cfg.MODEL.MASK_FORMER.TEST.PANOPTIC_ON:
+                evaluator_list.append(COCOPanopticEvaluator(dataset_name, output_folder))
+        # COCO
+        if evaluator_type == "coco_panoptic_seg" and cfg.MODEL.MASK_FORMER.TEST.INSTANCE_ON:
+            evaluator_list.append(COCOEvaluator(dataset_name, output_dir=output_folder))
+        if evaluator_type == "coco_panoptic_seg" and cfg.MODEL.MASK_FORMER.TEST.SEMANTIC_ON:
+            evaluator_list.append(SemSegEvaluator(dataset_name, distributed=True, output_dir=output_folder))
+        # Mapillary Vistas
+        if evaluator_type == "mapillary_vistas_panoptic_seg" and cfg.MODEL.MASK_FORMER.TEST.INSTANCE_ON:
+            evaluator_list.append(InstanceSegEvaluator(dataset_name, output_dir=output_folder))
+        if evaluator_type == "mapillary_vistas_panoptic_seg" and cfg.MODEL.MASK_FORMER.TEST.SEMANTIC_ON:
+            evaluator_list.append(SemSegEvaluator(dataset_name, distributed=True, output_dir=output_folder))
+        # Cityscapes
+        if evaluator_type == "cityscapes_instance":
+            assert (
+                torch.cuda.device_count() > comm.get_rank()
+            ), "CityscapesEvaluator currently do not work with multiple machines."
+            return CityscapesInstanceEvaluator(dataset_name)
+        if evaluator_type == "cityscapes_sem_seg":
+            assert (
+                torch.cuda.device_count() > comm.get_rank()
+            ), "CityscapesEvaluator currently do not work with multiple machines."
+            return CityscapesSemSegEvaluator(dataset_name)
+        if evaluator_type == "cityscapes_panoptic_seg":
+            if cfg.MODEL.MASK_FORMER.TEST.SEMANTIC_ON:
+                assert (
+                    torch.cuda.device_count() > comm.get_rank()
+                ), "CityscapesEvaluator currently do not work with multiple machines."
+                evaluator_list.append(CityscapesSemSegEvaluator(dataset_name))
+            if cfg.MODEL.MASK_FORMER.TEST.INSTANCE_ON:
+                assert (
+                    torch.cuda.device_count() > comm.get_rank()
+                ), "CityscapesEvaluator currently do not work with multiple machines."
+                evaluator_list.append(CityscapesInstanceEvaluator(dataset_name))
+        # ADE20K
+        if evaluator_type == "ade20k_panoptic_seg" and cfg.MODEL.MASK_FORMER.TEST.INSTANCE_ON:
+            evaluator_list.append(InstanceSegEvaluator(dataset_name, output_dir=output_folder))
+        # LVIS
+        if evaluator_type == "lvis":
+            return LVISEvaluator(dataset_name, output_dir=output_folder)
+        if len(evaluator_list) == 0:
+            raise NotImplementedError(
+                "no Evaluator for the dataset {} with the type {}".format(
+                    dataset_name, evaluator_type
+                )
+            )
+        elif len(evaluator_list) == 1:
+            return evaluator_list[0]
+        return DatasetEvaluators(evaluator_list)
+        '''
+        evaluator_list = []
+        evaluator_list.append(SemSegEvaluator(dataset_name, output_folder))
+        return DatasetEvaluators(evaluator_list)
+
+    @classmethod
+    def build_test_loader(cls, cfg, dataset_name):
+        mapper = MaskFormerSemanticDatasetMapperTest(cfg, True)
+        return build_detection_test_loader(cfg, dataset_name, mapper=mapper)
+
+    @classmethod
+    def build_train_loader(cls, cfg):
+        '''
+        # Semantic segmentation dataset mapper
+        if cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_semantic":
+            mapper = MaskFormerSemanticDatasetMapper(cfg, True)
+            return build_detection_train_loader(cfg, mapper=mapper)
+        # Panoptic segmentation dataset mapper
+        elif cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_panoptic":
+            mapper = MaskFormerPanopticDatasetMapper(cfg, True)
+            return build_detection_train_loader(cfg, mapper=mapper)
+        # Instance segmentation dataset mapper
+        elif cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_instance":
+            mapper = MaskFormerInstanceDatasetMapper(cfg, True)
+            return build_detection_train_loader(cfg, mapper=mapper)
+        # coco instance segmentation lsj new baseline
+        elif cfg.INPUT.DATASET_MAPPER_NAME == "coco_instance_lsj":
+            mapper = COCOInstanceNewBaselineDatasetMapper(cfg, True)
+            return build_detection_train_loader(cfg, mapper=mapper)
+        # coco panoptic segmentation lsj new baseline
+        elif cfg.INPUT.DATASET_MAPPER_NAME == "coco_panoptic_lsj":
+            mapper = COCOPanopticNewBaselineDatasetMapper(cfg, True)
+            return build_detection_train_loader(cfg, mapper=mapper)
+        else:
+            mapper = None
+            return build_detection_train_loader(cfg, mapper=mapper)
+        '''
+                # Semantic segmentation dataset mapper
+        if cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_semantic":
+            mapper = MaskFormerSemanticDatasetMapper(cfg, True)
+        # Panoptic segmentation dataset mapper
+        #elif cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_panoptic":
+        #    mapper = MaskFormerPanopticDatasetMapper(cfg, True)
+        # DETR-style dataset mapper for COCO panoptic segmentation
+        #elif cfg.INPUT.DATASET_MAPPER_NAME == "detr_panoptic":
+        #    mapper = DETRPanopticDatasetMapper(cfg, True)
+        else:
+            mapper = None
+        return build_detection_train_loader(cfg, mapper=mapper)
+
+    @classmethod
+    def build_lr_scheduler(cls, cfg, optimizer):
+        """
+        It now calls :func:`detectron2.solver.build_lr_scheduler`.
+        Overwrite it if you'd like a different scheduler.
+        """
+        return build_lr_scheduler(cfg, optimizer)
+
+    @classmethod
+    def build_optimizer(cls, cfg, model):
+        weight_decay_norm = cfg.SOLVER.WEIGHT_DECAY_NORM
+        weight_decay_embed = cfg.SOLVER.WEIGHT_DECAY_EMBED
+
+        defaults = {}
+        defaults["lr"] = cfg.SOLVER.BASE_LR
+        defaults["weight_decay"] = cfg.SOLVER.WEIGHT_DECAY
+
+        norm_module_types = (
+            torch.nn.BatchNorm1d,
+            torch.nn.BatchNorm2d,
+            torch.nn.BatchNorm3d,
+            torch.nn.SyncBatchNorm,
+            # NaiveSyncBatchNorm inherits from BatchNorm2d
+            torch.nn.GroupNorm,
+            torch.nn.InstanceNorm1d,
+            torch.nn.InstanceNorm2d,
+            torch.nn.InstanceNorm3d,
+            torch.nn.LayerNorm,
+            torch.nn.LocalResponseNorm,
+        )
+
+        params: List[Dict[str, Any]] = []
+        memo: Set[torch.nn.parameter.Parameter] = set()
+        for module_name, module in model.named_modules():
+            for module_param_name, value in module.named_parameters(recurse=False):
+                if not value.requires_grad:
+                    continue
+                # Avoid duplicating parameters
+                if value in memo:
+                    continue
+                memo.add(value)
+
+                hyperparams = copy.copy(defaults)
+                if "backbone" in module_name:
+                    hyperparams["lr"] = hyperparams["lr"] * cfg.SOLVER.BACKBONE_MULTIPLIER
+                if (
+                    "relative_position_bias_table" in module_param_name
+                    or "absolute_pos_embed" in module_param_name
+                ):
+                    print(module_param_name)
+                    hyperparams["weight_decay"] = 0.0
+                if isinstance(module, norm_module_types):
+                    hyperparams["weight_decay"] = weight_decay_norm
+                if isinstance(module, torch.nn.Embedding):
+                    hyperparams["weight_decay"] = weight_decay_embed
+                params.append({"params": [value], **hyperparams})
+
+        def maybe_add_full_model_gradient_clipping(optim):
+            # detectron2 doesn't have full model gradient clipping now
+            clip_norm_val = cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE
+            enable = (
+                cfg.SOLVER.CLIP_GRADIENTS.ENABLED
+                and cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE == "full_model"
+                and clip_norm_val > 0.0
+            )
+
+            class FullModelGradientClippingOptimizer(optim):
+                def step(self, closure=None):
+                    all_params = itertools.chain(*[x["params"] for x in self.param_groups])
+                    torch.nn.utils.clip_grad_norm_(all_params, clip_norm_val)
+                    super().step(closure=closure)
+
+            return FullModelGradientClippingOptimizer if enable else optim
+
+        optimizer_type = cfg.SOLVER.OPTIMIZER
+        if optimizer_type == "SGD":
+            optimizer = maybe_add_full_model_gradient_clipping(torch.optim.SGD)(
+                params, cfg.SOLVER.BASE_LR, momentum=cfg.SOLVER.MOMENTUM
+            )
+        elif optimizer_type == "ADAMW":
+            optimizer = maybe_add_full_model_gradient_clipping(torch.optim.AdamW)(
+                params, cfg.SOLVER.BASE_LR
+            )
+        else:
+            raise NotImplementedError(f"no optimizer type {optimizer_type}")
+        if not cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE == "full_model":
+            optimizer = maybe_add_gradient_clipping(cfg, optimizer)
+        return optimizer
+
+    @classmethod
+    def test_with_TTA(cls, cfg, model):
+        logger = logging.getLogger("detectron2.trainer")
+        # In the end of training, run an evaluation with TTA.
+        logger.info("Running inference with test-time augmentation ...")
+        model = SemanticSegmentorWithTTA(cfg, model)
+        evaluators = [
+            cls.build_evaluator(
+                cfg, name, output_folder=os.path.join(cfg.OUTPUT_DIR, "inference_TTA")
+            )
+            for name in cfg.DATASETS.TEST
+        ]
+        res = cls.test(cfg, model, evaluators)
+        res = OrderedDict({k + "_TTA": v for k, v in res.items()})
+        return res
+
+
+def setup(args):
+    """
+    Create configs and perform basic setups.
+    
+    cfg = get_cfg()
+    # for poly lr schedule
+    add_deeplab_config(cfg)
+    add_maskformer2_config(cfg)
+    cfg.merge_from_file(args.config_file)
+    cfg.merge_from_list(args.opts)
+    cfg.freeze()
+    default_setup(cfg, args)
+    # Setup logger for "mask_former" module
+    setup_logger(output=cfg.OUTPUT_DIR, distributed_rank=comm.get_rank(), name="mask_former")
+    return cfg
+    """
+
+    cfg = get_cfg()
+    add_deeplab_config(cfg)
+    add_maskformer2_config(cfg)
+    cfg.merge_from_file("configs/ade20k/semantic-segmentation/swin/maskformer2_swin_large_IN21k_384_bs16_160k_res640.yaml")
+    #cfg.merge_from_file("configs/ade20k/semantic-segmentation/swin/maskformer2_swin_small_bs16_160k.yaml")
+    
+    #cfg.merge_from_file("panopticConfig.yaml")
+    #cfg.merge_from_list(['MODEL.DEVICE', 'cuda', 'MODEL.WEIGHTS', 'detectron2://COCO-PanopticSegmentation/panoptic_fpn_R_50_3x/139514569/model_final_c10459.pkl'])
+    cfg.merge_from_list(['MODEL.DEVICE', 'cuda'])
+    cfg.MODEL.WEIGHTS = 'models/swinLarge.pkl'
+    #cfg.MODEL.WEIGHTS = 'models/swinS.pkl'
+    #cfg.MODEL.PIXEL_MEAN = [128,128,128,128]
+    #cfg.MODEL.PIXEL_STD = [58,58,58,58]
+    #cfg.MODEL.PIXEL_MEAN = [106,52,1979,143]
+    #cfg.MODEL.PIXEL_STD = [83,70,2981,65]
+    cfg.MODEL.PIXEL_MEAN = [1979]
+    cfg.MODEL.PIXEL_STD = [2981]
+    #cfg.MODEL.PIXEL_MEAN = [128,128,128]
+    #cfg.MODEL.PIXEL_STD = [58,58,58]
+    
+    print(cfg)
+    datasetSize = 62
+    cfg.DATASETS.TRAIN = ("ffi_train_stuffonly", )
+    cfg.DATASETS.TEST = ("ffi_val_stuffonly", )
+    cfg.DATALOADER.NUM_WORKERS = 1
+    cfg.SOLVER.IMS_PER_BATCH = 2
+    cfg.SOLVER.BASE_LR = 0.00005#la på ein 0
+    epochs = 300
+
+    cfg.SOLVER.MAX_ITER = datasetSize * epochs
+    cfg.SOLVER.STEPS = []
+    cfg.TEST.EVAL_PERIOD = datasetSize*5
+    cfg.SOLVER.CHECKPOINT_PERIOD = int(cfg.SOLVER.MAX_ITER/2)
+
+    #cfg.MODEL.ROI_HEADS.NUM_CLASSES = 0
+    cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 14
+
+    #cfg.MODEL.SEM_SEG_HEAD.PIXEL_DECODER_NAME = "TransformerEncoderPixelDecoder"
+
+    cfg.INPUT.MASK_FORMAT = "bitmask"
+    cfg.OUTPUT_DIR = "./ffiLidarRange16"
+
+    default_setup(cfg, args)
+    setup_logger(output=cfg.OUTPUT_DIR, distributed_rank=comm.get_rank(), name="mask_former")
+
+    return(cfg)
+
+
+def main(args):
+    cfg = setup(args)
+
+    '''
+    if args.eval_only:
+        model = Trainer.build_model(cfg)
+        DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
+            cfg.MODEL.WEIGHTS, resume=args.resume
+        )
+        res = Trainer.test(cfg, model)
+        if cfg.TEST.AUG.ENABLED:
+            res.update(Trainer.test_with_TTA(cfg, model))
+        if comm.is_main_process():
+            verify_results(cfg, res)
+        return res
+
+    trainer = Trainer(cfg)
+    trainer.resume_or_load(resume=args.resume)
+    return trainer.train()
+    '''
+    trainer = Trainer(cfg)
+    trainer.resume_or_load(resume=False)
+    return trainer.train()
+
+
+if __name__ == "__main__":
+    port = 2 ** 15 + 2 ** 14 + hash(os.getuid() if sys.platform != "win32" else 1) % 2 ** 14
+    args = default_argument_parser().parse_args()
+    print("Command Line Args:", args)
+    '''
+    launch(
+        main,
+        args.num_gpus,
+        num_machines=args.num_machines,
+        machine_rank=args.machine_rank,
+        dist_url=args.dist_url,
+        args=(args,),
+    )
+    '''
+    launch(
+        main,
+        1,
+        num_machines=1,
+        machine_rank=0,
+        dist_url="tcp://127.0.0.1:{}".format(port),
+        args=(args,),
+    )
+
+
